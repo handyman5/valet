@@ -11,7 +11,7 @@ from optparse import OptionParser
 # Global constants
 ###
 root = os.getcwd()
-options = None
+simple = False
 
 ###
 # Optional filetype support for wikitext rendering
@@ -24,25 +24,26 @@ except ImportError:
 # markdown
 try:
     import markdown
-    mimetypes.types_map.update({'.md': 'text/x-markdown', '.markdown': 'text/x-markdown'})
+    mimetypes.add_type('text/x-markdown', '.md')
+    mimetypes.add_type('text/x-markdown', '.markdown')
 except ImportError:
     markdown = None
 # creole
 try:
     import creole
-    mimetypes.types_map.update({'.creole': 'text/x-creole'})
+    mimetypes.add_type('text/x-creole', '.creole')
 except ImportError:
     creole = None
 # textile
 try:
     import textile
-    mimetypes.types_map.update({'.textile': 'text/x-textile'})
+    mimetypes.add_type('text/x-textile', '.textile')
 except ImportError:
     textile = None
 # rst
 try:
     import docutils.core as docutils
-    mimetypes.types_map.update({'.rst': 'text/x-restructured-text'})
+    mimetypes.add_type('text/x-restructured-text', '.rst')
 except ImportError:
     docutils = None
 # pygments
@@ -56,10 +57,11 @@ try:
 except ImportError:
     pygments = None
 
-# Add some common file extensions mimetypes either doesn't support or handles wrong
-mimetypes.types_map['.pl'] = 'application/x-perl'
-mimetypes.types_map['.c'] = 'text/x-csrc'
-mimetypes.types_map['.h'] = 'text/x-chdr'
+# Add some other common file extensions mimetypes either doesn't support or handles wrong
+mimetypes.add_type('application/x-perl', '.pl')
+mimetypes.add_type('text/x-csrc', '.c')
+mimetypes.add_type('text/x-chdr', '.h')
+mimetypes.add_type('text/plain', '.org')
 
 ###
 # Helpers for handling wikitext renderers
@@ -75,71 +77,61 @@ class ContentReadyException(Exception):
 def discern_type(path):
     # Add some common file extensions mimetypes either doesn't support or handles wrong
     t = mimetypes.guess_type(path, strict=False)[0]
-    print t
     if not t and Magic:
         t = Magic(mime=True).from_file(path)
-    print t
-    # special case for .org files I couldn't fix any other way
-    if t in ['application/vnd.lotus-organizer']:
-        t = 'text/plain'
     return t
 
 def dispatch(ctype, path):
-#    if ctype == 'text/x-c':
-#        ctype = 'text/x-csrc'
-
     if ctype == 'inode/symlink':
         realpath = os.path.abspath(os.readlink(path))
         if not os.path.abspath(realpath).startswith(root):
             abort(401, "Access denied; path outside of jail.")
         else:
-            path = realpath
-            ctype = discern_type(path)
-
-    if markdown and ctype == 'text/x-markdown':
-        output = StringIO.StringIO()
-        md = markdown.markdownFromFile(path, output=output,
-                                       extensions=['wikilinks', 'codehilite'],
-                                       extension_configs = {'wikilinks': [
-                                           ('base_url', '/view/'),
-                                           ('end_url',  '.md')]})
-        output.seek(0)
-        raise ContentReadyException(output.read())
-    elif creole and ctype == 'text/x-creole':
-        with open(path) as f:
-            data = f.read().decode('utf8')
-            raise ContentReadyException(creole.creole2html(data))
-    elif textile and ctype == 'text/x-textile':
-        with open(path) as f:
-            data = f.read().decode('utf8')
-            raise ContentReadyException(textile.textile(data, auto_link=True))
-    elif docutils and ctype == 'text/x-restructured-text':
-        with open(path) as f:
-            data = f.read().decode('utf8')
-            raise ContentReadyException(docutils.publish_string(data, writer_name='html'))
+            dispatch(discern_type(realpath), realpath)
     elif ctype == 'inode/directory':
         raise ContentReadyException(render_dir(path))
     elif ctype == 'inode/x-empty':
         raise ContentReadyException("<I>(empty file)</I>")
     elif ctype == 'text/html':
         pass
-#    elif pygments and \
-#         (ctype.startswith('text/') or ctype in ['x/sh', 'application/x-perl']):
-    elif pygments:
-        try:
-            lexer = get_lexer_for_mimetype(ctype)
-            if isinstance(lexer, pygments.lexers.TextLexer):
-                lexer = get_lexer_for_filename(path)
-            print path, lexer
-            formatter = HtmlFormatter(style='default')
+
+    if not simple:
+        if markdown and ctype == 'text/x-markdown':
+            output = StringIO.StringIO()
+            dirname = os.path.dirname(os.path.relpath(path, root))
+            md = markdown.markdownFromFile(path, output=output,
+                                           extensions=['wikilinks', 'codehilite'],
+                                           extension_configs = {'wikilinks': [
+                                               ('base_url', '/view/%s/' % dirname),
+                                               ('end_url',  '.md')]})
+            output.seek(0)
+            raise ContentReadyException(output.read())
+        elif creole and ctype == 'text/x-creole':
             with open(path) as f:
-                data = f.read()
-                result = highlight(data, lexer, formatter)
-                raise ContentReadyException(result, 'text/html',
-                                            style=formatter.get_style_defs())
-        except ClassNotFound as e:
-            print "no lexer found"
-            pass
+                data = f.read().decode('utf8')
+                raise ContentReadyException(creole.creole2html(data))
+        elif textile and ctype == 'text/x-textile':
+            with open(path) as f:
+                data = f.read().decode('utf8')
+                raise ContentReadyException(textile.textile(data, auto_link=True))
+        elif docutils and ctype == 'text/x-restructured-text':
+            with open(path) as f:
+                data = f.read().decode('utf8')
+                raise ContentReadyException(docutils.publish_string(data, writer_name='html'))
+        elif pygments:
+            try:
+                lexer = get_lexer_for_mimetype(ctype)
+                if isinstance(lexer, pygments.lexers.TextLexer):
+                    lexer = get_lexer_for_filename(path)
+                formatter = HtmlFormatter(style='default')
+                with open(path) as f:
+                    data = f.read()
+                    result = highlight(data, lexer, formatter)
+                    raise ContentReadyException(result, 'text/html',
+                                                style=formatter.get_style_defs())
+            except ClassNotFound as e:
+                print "no lexer found"
+                pass
 
 ###
 # Rendering helpers
@@ -169,7 +161,6 @@ def render_dir(path):
         pjoin = os.path.join(rpath, f)
         output += "<LI><A HREF='/view/%s'>%s</A></LI>\n" % (pjoin, f)
     output += '</UL>'
-    print output
     return output
 
 ###
@@ -204,7 +195,6 @@ def view(short_path=None):
         return template.render(path=full_path,
                                body="<H1>Please specify a <u>VALID</u> filename</H1>")
     ctype = discern_type(full_path)
-    print "full path: %s, ctype: %s" % (full_path, ctype)
     try:
         dispatch(ctype, full_path)
         response.content_type="%s; charset=utf-8" % ctype
@@ -212,16 +202,12 @@ def view(short_path=None):
             body = data.read()
             if ctype.startswith('image/'):
                 return body
-#            elif ctype in ['text/x-c', 'text/csv']:
-#                response.content_type="text/html; charset=utf-8"
-#                body = "<PRE>%s</PRE>" % body
             elif ctype.startswith('text/'):
                 response.content_type="text/html; charset=utf-8"
                 body = "<PRE>%s</PRE>" % body
             return template.render(path=full_path,
                                    body=body)
     except ContentReadyException as c:
-        print 'content ready exception', c.ctype
         response.content_type="%s; charset=utf-8" % c.ctype
         return template.render(path=full_path, style=c.style, body=c.content)
 
@@ -249,9 +235,10 @@ if __name__ == '__main__':
                       help="Make the website read-only")
     parser.add_option("-p", "--port", action="store", dest="port",
                       default=9876, type=int, help="Port number to use (defaults to 9876)")
-    parser.add_option("-n", "--nothing-fancy", action="store_true", dest="nofancy",
+    parser.add_option("-s", "--simple", action="store_true", dest="simple",
                       help="Disables all special-case processing (wikitext rendering, pygments syntax coloring, etc.)")
     (options,args) = parser.parse_args()
     root = os.path.abspath(options.root)
+    simple = options.simple
 
     run(host='0.0.0.0', port=options.port, reloader=True)
