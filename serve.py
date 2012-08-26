@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 
+from bottle import SimpleTemplate, abort, post, redirect, request, response, route, run, static_file
+from optparse import OptionParser
+import StringIO
+import mimetypes
 import os
 import os.path
-from bottle import abort, route, response, run, redirect, SimpleTemplate
-import mimetypes
-import StringIO
-from optparse import OptionParser
 
 ###
 # Global constants
@@ -71,16 +71,25 @@ class ContentReadyException(Exception):
         self.content = content
         self.ctype = ctype
         self.style = style
-    def __str__(self):
-        return self.content
 
+# Ensure a passed path is valid and inside the jail
+def check_path(short_path):
+    if not short_path: short_path = root
+    full_path = os.path.join(root, short_path)
+    if not os.path.abspath(full_path).startswith(root):
+        abort(401, "Access denied; path outside of jail.")
+    if not os.path.exists(full_path):
+        abort(404, "Please specify a valid filename.")
+    return full_path
+
+# Figure out the MIME type of a file if at all possible
 def discern_type(path):
-    # Add some common file extensions mimetypes either doesn't support or handles wrong
     t = mimetypes.guess_type(path, strict=False)[0]
     if not t and Magic:
         t = Magic(mime=True).from_file(path)
     return t
 
+# Handle various special-case MIME types (directories, links, pygments, etc.)
 def dispatch(ctype, path):
     if ctype == 'inode/symlink':
         realpath = os.path.abspath(os.readlink(path))
@@ -99,13 +108,14 @@ def dispatch(ctype, path):
         if markdown and ctype == 'text/x-markdown':
             output = StringIO.StringIO()
             dirname = os.path.dirname(os.path.relpath(path, root))
-            md = markdown.markdownFromFile(path, output=output,
-                                           extensions=['wikilinks', 'codehilite'],
-                                           extension_configs = {'wikilinks': [
-                                               ('base_url', '/view/%s/' % dirname),
-                                               ('end_url',  '.md')]})
+            md = markdown.markdownFromFile(
+                path, output=output,
+                extensions=['wikilinks', 'codehilite'],
+                extension_configs = {'wikilinks': [
+                    ('base_url', '/view/%s/' % dirname),
+                    ('end_url',  '.md')]})
             output.seek(0)
-            raise ContentReadyException(output.read())
+            raise ContentReadyException(output.read().decode('utf-8'))
         elif creole and ctype == 'text/x-creole':
             with open(path) as f:
                 data = f.read().decode('utf8')
@@ -125,7 +135,7 @@ def dispatch(ctype, path):
                     lexer = get_lexer_for_filename(path)
                 formatter = HtmlFormatter(style='default')
                 with open(path) as f:
-                    data = f.read()
+                    data = f.read().decode('utf-8')
                     result = highlight(data, lexer, formatter)
                     raise ContentReadyException(result, 'text/html',
                                                 style=formatter.get_style_defs())
@@ -154,9 +164,16 @@ def render_navbar(path):
     output.append(crumbs[-1][1])
     return ' > '.join(output)
 
+def render_edit_link(path):
+    return "&nbsp;<A CLASS='link' HREF='/edit/%s'>e</A>" % os.path.relpath(path, root)
+
+def render_raw_link(path):
+    return "&nbsp;<A CLASS='link' HREF='/view/%s?raw'>r</A>" % os.path.relpath(path, root)
+
 def render_dir(path):
     output = '<UL>'
     for f in os.listdir(path):
+        if f in ['.git', '.svn', '.hg', 'CVS']: continue
         rpath = os.path.relpath(path, root)
         pjoin = os.path.join(rpath, f)
         output += "<LI><A HREF='/view/%s'>%s</A></LI>\n" % (pjoin, f)
@@ -168,14 +185,21 @@ def render_dir(path):
 ###
 template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
 <STYLE>{{style}}
-.navbar { display: inline-block; border: solid 3px gray; border-top: 0px; padding-left: 2px; padding-right: 2px; }
+.navbar { display: inline-block; border: solid 3px gray; border-top: 0px; padding-left: 2px; padding-right: 2px; float: left; }
+.navlink { float: right; }
 </STYLE></HEAD>
 <BODY>
+<DIV STYLE='display: inline-block;'>
 <DIV CLASS='navbar'>{{!render_navbar(path)}}</DIV>
-<DIV CLASS='main'>{{!body}}</DIV>
-<!-- template --></BODY></HTML>
+<DIV CLASS='navlink'>{{!render_raw_link(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_edit_link(path)}}</DIV>
+</DIV>
+<DIV CLASS='main'>
+{{!body}}
+</DIV></BODY></HTML>
 """)
-template.defaults.update({'style': '', 'body': '', 'render_navbar': render_navbar })
+template.defaults.update({'style': '', 'body': ''})
+template.defaults.update(locals())
 
 ###
 # Routes
@@ -187,44 +211,44 @@ def redirect_root():
 @route('/view')
 @route('/view/<short_path:path>')
 def view(short_path=None):
-    if not short_path: short_path = root
-    full_path = os.path.join(root, short_path)
-    if not os.path.abspath(full_path).startswith(root):
-        abort(401, "Access denied; path outside of jail.")
-    if not os.path.exists(full_path):
-        return template.render(path=full_path,
-                               body="<H1>Please specify a <u>VALID</u> filename</H1>")
+    full_path = check_path(short_path)
     ctype = discern_type(full_path)
     try:
+        if 'raw' in request.query:
+            if not os.path.isdir(full_path):
+                return static_file(os.path.basename(full_path), os.path.dirname(full_path))
         dispatch(ctype, full_path)
-        response.content_type="%s; charset=utf-8" % ctype
-        with open(full_path) as data:
-            body = data.read()
-            if ctype.startswith('image/'):
-                return body
-            elif ctype.startswith('text/'):
-                response.content_type="text/html; charset=utf-8"
-                body = "<PRE>%s</PRE>" % body
-            return template.render(path=full_path,
-                                   body=body)
+        if ctype.startswith('text/'):
+            with open(full_path, 'rb') as data:
+                body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
+                return template.render(path=full_path, body=body)
+        else:
+            return static_file(os.path.basename(full_path), os.path.dirname(full_path))
     except ContentReadyException as c:
         response.content_type="%s; charset=utf-8" % c.ctype
         return template.render(path=full_path, style=c.style, body=c.content)
 
 @route('/edit')
-@route('/edit/<name:path>')
-def edit(name=None):
-    with open(name) as data:
-        output = "<FORM METHOD='POST' ACTION='/post/>"
-        output += "<TEXTAREA NAME='data' STYLE='width:100%,height=100%'>"
+@route('/edit/<short_path:path>')
+def edit(short_path=None):
+    full_path = check_path(short_path)
+    ctype = discern_type(full_path)
+    if not (ctype.startswith('text/') or ctype in ['application/xml']):
+        abort(403, 'Not an editable file type')
+    with open(full_path) as data:
+        output = "<FORM METHOD='POST' ACTION='/post/%s' ENCTYPE='multipart/form-data'>" % short_path
+        output += "<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = \"/view/%s\"'><BR>" % short_path
+        output += "<TEXTAREA NAME='data' ROWS=50 COLS=100>"
         output += data.read()
-        output += "</TEXTAREA>"
-    return template.render(path=name, body=output)
+        output += "</TEXTAREA></FORM>"
+    return template.render(path=full_path, body=output)
 
-@route('/post')
-@route('/post/<name:path>')
-def post(name=None):
-    pass
+@post('/post/<short_path:path>')
+def post(short_path=None):
+    full_path = check_path(short_path)
+    with open(full_path, 'wb') as handle:
+        handle.write(request.forms.get('data'))
+    redirect('/view/%s' % short_path)
 
 
 if __name__ == '__main__':
