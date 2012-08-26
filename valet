@@ -6,12 +6,14 @@ import StringIO
 import mimetypes
 import os
 import os.path
+import subprocess
 
 ###
 # Global constants
 ###
 root = os.getcwd()
 simple = False
+vcs = True
 
 ###
 # Optional filetype support for wikitext rendering
@@ -181,7 +183,7 @@ def render_dir(path):
     return output
 
 ###
-# Build standard page template
+# Build standard page templates
 ###
 template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
 <STYLE>{{style}}
@@ -200,6 +202,17 @@ template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
 """)
 template.defaults.update({'style': '', 'body': ''})
 template.defaults.update(locals())
+
+edit_form_template = SimpleTemplate("""
+<FORM METHOD='post' ACTION='/post/{{short_path}}' ENCTYPE='multipart/form-data'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "/view/{{short_path"'>
+%if vcs:
+ <I>(edits will be committed)</I>
+%end
+<BR><TEXTAREA NAME='data' ROWS=50 COLS=100>
+{{data}}
+</TEXTAREA></FORM>
+""")
 
 ###
 # Routes
@@ -233,21 +246,24 @@ def view(short_path=None):
 def edit(short_path=None):
     full_path = check_path(short_path)
     ctype = discern_type(full_path)
-    if not (ctype.startswith('text/') or ctype in ['application/xml']):
+    if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
         abort(403, 'Not an editable file type')
     with open(full_path) as data:
-        output = "<FORM METHOD='POST' ACTION='/post/%s' ENCTYPE='multipart/form-data'>" % short_path
-        output += "<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = \"/view/%s\"'><BR>" % short_path
-        output += "<TEXTAREA NAME='data' ROWS=50 COLS=100>"
-        output += data.read()
-        output += "</TEXTAREA></FORM>"
-    return template.render(path=full_path, body=output)
+        output = edit_form_template.render(short_path=short_path, data=data.read(), vcs=vcs)
+        return template.render(path=full_path, body=output)
 
 @post('/post/<short_path:path>')
 def post(short_path=None):
     full_path = check_path(short_path)
     with open(full_path, 'wb') as handle:
         handle.write(request.forms.get('data'))
+    if vcs:
+        gitdir = os.path.join(root, '.git')
+        if os.path.isdir(gitdir):
+            command = "git --work-tree=%s --git-dir=%s add %s" % (root, gitdir, full_path)
+            subprocess.Popen(command, shell=True)
+            command = "git --work-tree=%s --git-dir=%s commit -m 'valet: updated %s'" % (root, gitdir, short_path)
+            subprocess.Popen(command, shell=True)
     redirect('/view/%s' % short_path)
 
 
@@ -261,8 +277,11 @@ if __name__ == '__main__':
                       default=9876, type=int, help="Port number to use (defaults to 9876)")
     parser.add_option("-s", "--simple", action="store_true", dest="simple",
                       help="Disables all special-case processing (wikitext rendering, pygments syntax coloring, etc.)")
+    parser.add_option("-v", "--vcs", action="store_true", dest="vcs", default=False,
+                      help="Edits in the web interface are automatically commited to the appropriate VCS")
     (options,args) = parser.parse_args()
     root = os.path.abspath(options.root)
     simple = options.simple
+    vcs = options.vcs
 
     run(host='0.0.0.0', port=options.port, reloader=True)
