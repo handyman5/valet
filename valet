@@ -12,6 +12,7 @@ import subprocess
 # Global constants
 ###
 root = os.getcwd()
+readonly = False
 simple = False
 vcs = True
 
@@ -20,7 +21,7 @@ vcs = True
 ###
 # using the magic byte-marker file to determine types
 try:
-    from magic import Magic
+    from magic import Magic, MagicException
 except ImportError:
     Magic = None
 # markdown
@@ -89,6 +90,16 @@ def discern_type(path):
     t = mimetypes.guess_type(path, strict=False)[0]
     if not t and Magic:
         t = Magic(mime=True).from_file(path)
+    if not t:
+        # the python-magic module installed on Ubuntu is busted; reimplement it here
+        if os.path.isdir(path):
+            t = 'inode/directory'
+        elif os.path.islink(path):
+            'inode/symlink'
+        elif os.stat(path)[6]==0:
+            'inode/x-empty'
+        else:
+            t = "text/plain"
     return t
 
 # Handle various special-case MIME types (directories, links, pygments, etc.)
@@ -167,14 +178,20 @@ def render_navbar(path):
     return ' > '.join(output)
 
 def render_edit_link(path):
-    return "&nbsp;<A CLASS='link' HREF='/edit/%s'>e</A>" % os.path.relpath(path, root)
+    output = "&nbsp;<A CLASS='link' HREF='/edit/%s'>edit</A>" % os.path.relpath(path, root)
+    if readonly or os.path.isdir(path):
+        output = ""
+    return output
 
 def render_raw_link(path):
-    return "&nbsp;<A CLASS='link' HREF='/view/%s?raw'>r</A>" % os.path.relpath(path, root)
+    output = "&nbsp;<A CLASS='link' HREF='/view/%s?raw'>raw</A>" % os.path.relpath(path, root)
+    if os.path.isdir(path):
+        output = ""
+    return output
 
 def render_dir(path):
     output = '<UL>'
-    for f in os.listdir(path):
+    for f in sorted(os.listdir(path)):
         if f in ['.git', '.svn', '.hg', 'CVS']: continue
         rpath = os.path.relpath(path, root)
         pjoin = os.path.join(rpath, f)
@@ -205,7 +222,7 @@ template.defaults.update(locals())
 
 edit_form_template = SimpleTemplate("""
 <FORM METHOD='post' ACTION='/post/{{short_path}}' ENCTYPE='multipart/form-data'>
-<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "/view/{{short_path"'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "/view/{{short_path}}"'>
 %if vcs:
  <I>(edits will be committed)</I>
 %end
@@ -232,28 +249,35 @@ def view(short_path=None):
                 return static_file(os.path.basename(full_path), os.path.dirname(full_path))
         dispatch(ctype, full_path)
         if ctype.startswith('text/'):
-            with open(full_path, 'rb') as data:
-                body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
-                return template.render(path=full_path, body=body)
+            try:
+                with open(full_path, 'rb') as data:
+                    body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
+                    return template.render(path=full_path, body=body, readonly=readonly)
+            except IOError as e:
+                abort(403, e)
         else:
             return static_file(os.path.basename(full_path), os.path.dirname(full_path))
     except ContentReadyException as c:
         response.content_type="%s; charset=utf-8" % c.ctype
-        return template.render(path=full_path, style=c.style, body=c.content)
+        return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
 
 @route('/edit')
 @route('/edit/<short_path:path>')
 def edit(short_path=None):
+    if readonly:
+        abort(403, 'Readonly mode is enabled, no editing')
     full_path = check_path(short_path)
     ctype = discern_type(full_path)
     if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
         abort(403, 'Not an editable file type')
     with open(full_path) as data:
         output = edit_form_template.render(short_path=short_path, data=data.read(), vcs=vcs)
-        return template.render(path=full_path, body=output)
+        return template.render(path=full_path, body=output, readonly=readonly)
 
 @post('/post/<short_path:path>')
 def post(short_path=None):
+    if readonly:
+        abort(403, 'Readonly mode is enabled, no editing')
     full_path = check_path(short_path)
     with open(full_path, 'wb') as handle:
         handle.write(request.forms.get('data'))
@@ -272,7 +296,7 @@ if __name__ == '__main__':
     parser.add_option("-d", "--directory", action="store", dest="root",
                       default=os.getcwd(), help="Directory to serve (defaults to $CWD)")
     parser.add_option("-r", "--readonly", action="store_true", dest="readonly",
-                      help="Make the website read-only")
+                      default=False, help="Make the website read-only")
     parser.add_option("-p", "--port", action="store", dest="port",
                       default=9876, type=int, help="Port number to use (defaults to 9876)")
     parser.add_option("-s", "--simple", action="store_true", dest="simple",
@@ -281,6 +305,7 @@ if __name__ == '__main__':
                       help="Edits in the web interface are automatically commited to the appropriate VCS")
     (options,args) = parser.parse_args()
     root = os.path.abspath(options.root)
+    readonly = options.readonly
     simple = options.simple
     vcs = options.vcs
 
