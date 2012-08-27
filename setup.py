@@ -12,6 +12,6 @@ setup(
 	url = "https://github.com/handyman5/valet",
 	download_url = "https://github.com/handyman5/valet/tarball/master",
 	description = "valet is a script that turns any directory into a simple wiki, complete with wikitext rendering and automatically committing changes to version control.",
-        requires = ['bottle'],
+        install_requires = ['bottle'],
 	scripts = ['valet']
 )
