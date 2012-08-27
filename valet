@@ -246,7 +246,7 @@ def view(short_path=None):
     try:
         if 'raw' in request.query:
             if not os.path.isdir(full_path):
-                return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype='text/plain')
+                return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
         dispatch(ctype, full_path)
         if ctype.startswith('text/'):
             try:
@@ -256,7 +256,7 @@ def view(short_path=None):
             except IOError as e:
                 abort(403, e)
         else:
-            return static_file(os.path.basename(full_path), os.path.dirname(full_path))
+            return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
     except ContentReadyException as c:
         response.content_type="%s; charset=utf-8" % c.ctype
         return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
