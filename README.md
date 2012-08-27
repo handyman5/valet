@@ -26,6 +26,12 @@ Requirements
 - Python 2.6+
 - [`bottle`](http://bottlepy.org/)
 
+Tested on:
+
+- Centos 5.4 (python 2.6)
+- Mac OS X 10.7 (python 2.7)
+- Ubuntu 12.04.1 (python 2.7)
+
 Optional Components
 ===================
 `valet` supports lots of useful modules, which will be automatically enabled if present:
