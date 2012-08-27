@@ -160,7 +160,7 @@ def dispatch(ctype, path):
 # Rendering helpers
 ###
 def render_navbar(path):
-    path_parts = os.path.relpath(path, root).split('/')
+    path_parts = os.path.relpath(path, root).split(os.path.sep)
     path_stack = []
     crumbs = []
 
