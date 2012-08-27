@@ -31,6 +31,7 @@ Tested on:
 - Centos 5.4 (python 2.6)
 - Mac OS X 10.7 (python 2.7)
 - Ubuntu 12.04.1 (python 2.7)
+- Windows 7 (python 2.7)
 
 Optional Components
 ===================
