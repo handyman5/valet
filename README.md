@@ -21,6 +21,11 @@ Other options:
 - `-v`: automatically commit edits into version control if possible
     - Currently only git is supported.
 
+Installation
+============
+
+    $ pip install valet
+
 Requirements
 ============
 - Python 2.6+
