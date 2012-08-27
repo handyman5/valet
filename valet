@@ -206,6 +206,8 @@ template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
 <STYLE>{{style}}
 .navbar { display: inline-block; border: solid 3px gray; border-top: 0px; padding-left: 2px; padding-right: 2px; float: left; }
 .navlink { float: right; }
+.dirlist { position: relative; float: right; right: 0; top: 0; border: solid 3px gray; border-top: 0px; border-right: 0px; margin-left: 10px; }
+pre { word-wrap: break-word; }
 </STYLE></HEAD>
 <BODY>
 <DIV STYLE='display: inline-block;'>
@@ -213,6 +215,7 @@ template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
 <DIV CLASS='navlink'>{{!render_raw_link(path)}}</DIV>
 <DIV CLASS='navlink'>{{!render_edit_link(path)}}</DIV>
 </DIV>
+<DIV CLASS='dirlist'>{{!render_dir(os.path.dirname(path)) if not os.path.isdir(path) else ""}}</DIV>
 <DIV CLASS='main'>
 {{!body}}
 </DIV></BODY></HTML>
