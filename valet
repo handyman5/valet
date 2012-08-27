@@ -167,7 +167,7 @@ def render_navbar(path):
     for p in path_parts:
         if p == '.': continue
         path_stack.append(p)
-        crumbs.append(('/'.join(path_stack), p))
+        crumbs.append((os.path.sep.join(path_stack), p))
 
     crumbs.insert(0, ('', '<I>Home</I>'))
 
