@@ -280,7 +280,7 @@ def post(short_path=None):
         abort(403, 'Readonly mode is enabled, no editing')
     full_path = check_path(short_path)
     with open(full_path, 'wb') as handle:
-        handle.write(request.forms.get('data'))
+        handle.write(request.forms.get('data').rstrip())
     if vcs:
         gitdir = os.path.join(root, '.git')
         if os.path.isdir(gitdir):
