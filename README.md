@@ -1,8 +1,29 @@
 Introduction
 ============
-`valet` is a script that turns any directory into a simple wiki, complete with wikitext rendering and automatically committing changes to version control.
+`valet` is a script that turns any directory into a simple wiki, complete with wikitext rendering, editing, and automatically committing changes to version control.
 
 It's a single file with no strict requirements aside from [`bottle`](http://bottlepy.org/).
+
+News
+====
+2012-10-28
+----------
+I spent some time hacking on `valet` this weekend, fixing a few bugs and adding one big new feature: CGI/WSGI support. Now if you link or rename `valet` to `something.cgi` or `something.fcgi`, it will "Do The Right Thing" and operate as a proper webapp. (WSGI support requires [`flup`](http://trac.saddi.com/flup).)
+
+This feature was required for me to run `valet` as a lightweight wiki on my DreamHost server without interfering in that environment by opening a new port or leaving a long-running service around. I didn't add a configuration interface; if you're going to be linking or renaming the script, open it up and change the options hard-coded near the top.
+
+Other changes and new features:
+
+- Added a `mime` query argument to override the automatic filetype detection.
+    - You can use this if, for instance, you have a Python script without the ".py" extension; add `?mime=text/x-python` to get it properly syntax-colored anyway.
+- Added support for arbitrary URL prefixes.
+    - This just works automatically; `valet` will figure out where you put it and prepend that to all of the links instead of hardcoding "/view" etc.
+	- This doesn't work super-well with Apache's `mod_rewrite`; it basically ignores the rewrite headers. This is a limitation of `bottle` but I'm not sure how to do it better anyway.
+
+Fixes:
+
+- Added proper support for empty "edit" and "post" routes with a slash at the end (now it will complain about no file being provided instead of saying the route doesn't exist)
+- Fixed an error output that caused problems when running as a CGI (now writes to stderr)
 
 Usage
 =====
@@ -34,6 +55,8 @@ Requirements
 Tested on:
 
 - Centos 5.4 (python 2.6)
+- Debian 6.0.4 (python 2.6)
+- Gentoo (python 2.7)
 - Mac OS X 10.7 (python 2.7)
 - Ubuntu 12.04.1 (python 2.7)
 - Windows 7 (python 2.7)

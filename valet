@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 
-from bottle import SimpleTemplate, abort, post, redirect, request, response, route, run, static_file
+from bottle import SimpleTemplate, abort, default_app, post, redirect, request, response, route, run, static_file
 from optparse import OptionParser
 import StringIO
 import mimetypes
 import os
 import os.path
 import subprocess
+import sys
 
 ###
 # Global constants
 ###
+app = default_app()
 root = os.getcwd()
 readonly = False
 simple = False
@@ -125,7 +127,7 @@ def dispatch(ctype, path):
                 path, output=output,
                 extensions=['wikilinks', 'codehilite'],
                 extension_configs = {'wikilinks': [
-                    ('base_url', '/view/%s/' % dirname),
+                    ('base_url', '%s/%s/' % (app.get_url('view'), dirname)),
                     ('end_url',  '.md')]})
             output.seek(0)
             raise ContentReadyException(output.read().decode('utf-8'))
@@ -153,8 +155,79 @@ def dispatch(ctype, path):
                     raise ContentReadyException(result, 'text/html',
                                                 style=formatter.get_style_defs())
             except ClassNotFound as e:
-                print "no lexer found"
+                print >> sys.stderr, "no lexer found for URL %s" % path
                 pass
+
+###
+# Routes
+###
+@route('/')
+def redirect_root():
+    redirect(app.get_url('view'))
+
+@route('/view', name='view')
+@route('/view/')
+@route('/view/<short_path:path>')
+def view(short_path=None):
+    full_path = check_path(short_path)
+    if 'mime' in request.query:
+        ctype = request.query.mime
+    else:
+        ctype = discern_type(full_path)
+    try:
+        if 'raw' in request.query:
+            if not os.path.isdir(full_path):
+                return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
+        dispatch(ctype, full_path)
+        if ctype.startswith('text/'):
+            try:
+                with open(full_path, 'rb') as data:
+                    body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
+                    return template.render(path=full_path, body=body, readonly=readonly)
+            except IOError as e:
+                abort(403, e)
+        else:
+            return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
+    except ContentReadyException as c:
+        response.content_type="%s; charset=utf-8" % c.ctype
+        return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
+
+@route('/edit', name='edit')
+@route('/edit/<short_path:path>', name='edit')
+def edit(short_path=None):
+    if not short_path:
+        abort(404, 'No file specified.')
+    if readonly:
+        abort(403, 'Readonly mode is enabled, no editing')
+    full_path = check_path(short_path)
+    ctype = discern_type(full_path)
+    if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
+        abort(403, 'Not an editable file type')
+    with open(full_path) as data:
+        output = edit_form_template.render(short_path=short_path, data=data.read(), vcs=vcs)
+        return template.render(path=full_path, body=output, readonly=readonly)
+
+@post('/post', name='post')
+@post('/post/<short_path:path>')
+def post(short_path=None):
+    if not short_path:
+        abort(404, 'No file specified.')
+    if readonly:
+        abort(403, 'Readonly mode is enabled, no editing')
+    full_path = check_path(short_path)
+    try:
+        with open(full_path, 'wb') as handle:
+            handle.write(request.forms.get('data').replace('\r\n', '\n'))
+    except IOError as e:
+        abort(403, e)
+    if vcs:
+        gitdir = os.path.join(root, '.git')
+        if os.path.isdir(gitdir):
+            command = "git --work-tree=%s --git-dir=%s add %s" % (root, gitdir, full_path)
+            subprocess.Popen(command, shell=True)
+            command = "git --work-tree=%s --git-dir=%s commit -m 'valet: updated %s'" % (root, gitdir, short_path)
+            subprocess.Popen(command, shell=True)
+    redirect('%s/%s' % (app.get_url('view'), short_path))
 
 ###
 # Rendering helpers
@@ -173,18 +246,18 @@ def render_navbar(path):
 
     output = []
     for (p, l) in crumbs[0:-1]:
-        output.append("<A HREF='/view/%s'>%s</A>" % (p, l))
+        output.append("<A HREF='%s/%s'>%s</A>" % (app.get_url('view'), p, l))
     output.append(crumbs[-1][1])
     return ' > '.join(output)
 
 def render_edit_link(path):
-    output = "&nbsp;<A CLASS='link' HREF='/edit/%s'>edit</A>" % os.path.relpath(path, root)
+    output = "&nbsp;<A CLASS='link' HREF='%s/%s'>edit</A>" % (app.get_url('edit'), os.path.relpath(path, root))
     if readonly or os.path.isdir(path):
         output = ""
     return output
 
 def render_raw_link(path):
-    output = "&nbsp;<A CLASS='link' HREF='/view/%s?raw'>raw</A>" % os.path.relpath(path, root)
+    output = "&nbsp;<A CLASS='link' HREF='%s/%s?raw'>raw</A>" % (app.get_url('view'), os.path.relpath(path, root))
     if os.path.isdir(path):
         output = ""
     return output
@@ -195,7 +268,7 @@ def render_dir(path):
         if f in ['.git', '.svn', '.hg', 'CVS']: continue
         rpath = os.path.relpath(path, root)
         pjoin = os.path.join(rpath, f)
-        output += "<LI><A HREF='/view/%s'>%s</A></LI>\n" % (pjoin, f)
+        output += "<LI><A HREF='%s/%s'>%s</A></LI>\n" % (app.get_url('view'), pjoin, f)
     output += '</UL>'
     return output
 
@@ -224,8 +297,8 @@ template.defaults.update({'style': '', 'body': ''})
 template.defaults.update(locals())
 
 edit_form_template = SimpleTemplate("""
-<FORM METHOD='post' ACTION='/post/{{short_path}}' ENCTYPE='multipart/form-data'>
-<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "/view/{{short_path}}"'>
+<FORM METHOD='post' ACTION='{{!app.get_url('post')}}/{{short_path}}' ENCTYPE='multipart/form-data'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!app.get_url('edit')}}/{{short_path}}"'>
 %if vcs:
  <I>(edits will be committed)</I>
 %end
@@ -234,85 +307,29 @@ edit_form_template = SimpleTemplate("""
 </TEXTAREA></FORM>
 """)
 
-###
-# Routes
-###
-@route('/')
-def redirect_root():
-    redirect('/view/')
-
-@route('/view')
-@route('/view/<short_path:path>')
-def view(short_path=None):
-    full_path = check_path(short_path)
-    ctype = discern_type(full_path)
-    try:
-        if 'raw' in request.query:
-            if not os.path.isdir(full_path):
-                return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
-        dispatch(ctype, full_path)
-        if ctype.startswith('text/'):
-            try:
-                with open(full_path, 'rb') as data:
-                    body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
-                    return template.render(path=full_path, body=body, readonly=readonly)
-            except IOError as e:
-                abort(403, e)
-        else:
-            return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
-    except ContentReadyException as c:
-        response.content_type="%s; charset=utf-8" % c.ctype
-        return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
-
-@route('/edit')
-@route('/edit/<short_path:path>')
-def edit(short_path=None):
-    if readonly:
-        abort(403, 'Readonly mode is enabled, no editing')
-    full_path = check_path(short_path)
-    ctype = discern_type(full_path)
-    if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
-        abort(403, 'Not an editable file type')
-    with open(full_path) as data:
-        output = edit_form_template.render(short_path=short_path, data=data.read(), vcs=vcs)
-        return template.render(path=full_path, body=output, readonly=readonly)
-
-@post('/post/<short_path:path>')
-def post(short_path=None):
-    if readonly:
-        abort(403, 'Readonly mode is enabled, no editing')
-    full_path = check_path(short_path)
-    try:
-        with open(full_path, 'wb') as handle:
-            handle.write(request.forms.get('data').replace('\r\n', '\n'))
-    except IOError as e:
-        abort(403, e)
-    if vcs:
-        gitdir = os.path.join(root, '.git')
-        if os.path.isdir(gitdir):
-            command = "git --work-tree=%s --git-dir=%s add %s" % (root, gitdir, full_path)
-            subprocess.Popen(command, shell=True)
-            command = "git --work-tree=%s --git-dir=%s commit -m 'valet: updated %s'" % (root, gitdir, short_path)
-            subprocess.Popen(command, shell=True)
-    redirect('/view/%s' % short_path)
-
 
 if __name__ == '__main__':
-    parser = OptionParser(usage="usage: %prog [<options>]")
-    parser.add_option("-d", "--directory", action="store", dest="root",
-                      default=os.getcwd(), help="Directory to serve (defaults to $CWD)")
-    parser.add_option("-r", "--readonly", action="store_true", dest="readonly",
-                      default=False, help="Make the website read-only")
-    parser.add_option("-p", "--port", action="store", dest="port",
-                      default=9876, type=int, help="Port number to use (defaults to 9876)")
-    parser.add_option("-s", "--simple", action="store_true", dest="simple",
-                      help="Disables all special-case processing (wikitext rendering, pygments syntax coloring, etc.)")
-    parser.add_option("-v", "--vcs", action="store_true", dest="vcs", default=False,
-                      help="Edits in the web interface are automatically commited to the appropriate VCS")
-    (options,args) = parser.parse_args()
-    root = os.path.abspath(options.root)
-    readonly = options.readonly
-    simple = options.simple
-    vcs = options.vcs
-
-    run(host='0.0.0.0', port=options.port)
+    if sys.argv[0].endswith('.cgi'):
+        run(server='cgi')
+    elif sys.argv[0].endswith('.fcgi'):
+        from flup.server.fcgi import WSGIServer
+        WSGIServer(app.wsgi).run()
+    else:
+        parser = OptionParser(usage="usage: %prog [<options>]")
+        parser.add_option("-d", "--directory", action="store", dest="root",
+                          default=os.getcwd(), help="Directory to serve (defaults to $CWD)")
+        parser.add_option("-r", "--readonly", action="store_true", dest="readonly",
+                          default=False, help="Make the website read-only")
+        parser.add_option("-p", "--port", action="store", dest="port",
+                          default=9876, type=int, help="Port number to use (defaults to 9876)")
+        parser.add_option("-s", "--simple", action="store_true", dest="simple",
+                          help="Disables all special-case processing (wikitext rendering, pygments syntax coloring, etc.)")
+        parser.add_option("-v", "--vcs", action="store_true", dest="vcs", default=False,
+                                                        help="Edits in the web interface are automatically commited to the appropriate VCS")
+        (options,args) = parser.parse_args()
+        root = os.path.abspath(options.root)
+        readonly = options.readonly
+        simple = options.simple
+        vcs = options.vcs
+        
+        run(host='0.0.0.0', port=options.port)
