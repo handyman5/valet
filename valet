@@ -105,7 +105,7 @@ def discern_type(path):
     return t
 
 # Handle various special-case MIME types (directories, links, pygments, etc.)
-def dispatch(ctype, path):
+def dispatch(ctype, path, diff=None):
     if ctype == 'inode/symlink':
         realpath = os.path.abspath(os.readlink(path))
         if not os.path.abspath(realpath).startswith(root):
@@ -149,14 +149,25 @@ def dispatch(ctype, path):
                 if isinstance(lexer, pygments.lexers.TextLexer):
                     lexer = get_lexer_for_filename(path)
                 formatter = HtmlFormatter(style='default')
-                with open(path) as f:
-                    data = f.read().decode('utf-8')
-                    result = highlight(data, lexer, formatter)
-                    raise ContentReadyException(result, 'text/html',
-                                                style=formatter.get_style_defs())
+                if ctype == 'text/x-diff' and diff:
+                    data = diff
+                else:
+                    with open(path) as f:
+                        data = f.read().decode('utf-8')
+                result = highlight(data, lexer, formatter)
+                raise ContentReadyException(result, 'text/html',
+                                            style=formatter.get_style_defs())
             except ClassNotFound as e:
                 print >> sys.stderr, "no lexer found for URL %s" % path
                 pass
+
+def git_command(cmd):
+    gitdir = os.path.join(root, '.git')
+    command = "git --work-tree=%s --git-dir=%s %s -- %s" % (root, gitdir, cmd, full_path)
+    s = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+    results = s.communicate()[0].split('\n')
+    
+
 
 ###
 # Routes
@@ -191,6 +202,32 @@ def view(short_path=None):
     except ContentReadyException as c:
         response.content_type="%s; charset=utf-8" % c.ctype
         return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
+
+@route('/diff', name='diff')
+@route('/diff/')
+@route('/diff/<short_path:path>')
+def diff(short_path=None):
+    if not vcs:
+        abort(403, "Version Control is not enabled! No diffs for you.")
+    full_path = check_path(short_path)
+    gitdir = os.path.join(root, '.git')
+    if os.path.isdir(gitdir):
+        command = "git --work-tree=%s --git-dir=%s log -n2 --pretty=format:%%h -- %s" % (root, gitdir, full_path)
+        print command
+        s = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+        hashes = s.communicate()[0].split('\n')
+        if not hashes[0]:
+            redirect('%s/%s' % (app.get_url('view'), short_path))
+        if hashes[0]:
+            command = "git --work-tree=%s --git-dir=%s diff -b %s..%s -- %s" % (root, gitdir, hashes[0], hashes[1], full_path)
+            print command
+            s = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+            diff = s.communicate()[0]
+            try:
+                dispatch('text/x-diff', None, diff=diff)
+            except ContentReadyException as c:
+                response.content_type="%s; charset=utf-8" % c.ctype
+                return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
 
 @route('/edit', name='edit')
 @route('/edit/<short_path:path>', name='edit')
@@ -256,6 +293,22 @@ def render_edit_link(path):
         output = ""
     return output
 
+def has_git_diff(path):
+    full_path = check_path(path)
+    gitdir = os.path.join(root, '.git')
+    if os.path.isdir(gitdir):
+        command = "git --work-tree=%s --git-dir=%s log -n2 --pretty=format:%%h -- %s" % (root, gitdir, full_path)
+        s = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+        hashes = s.communicate()[0].split('\n')
+        # returns True only if both hash1 and hash2 exist
+        return bool(hashes[0] and len(hashes) == 2)
+
+def render_diff_link(path):
+    output = "&nbsp;<A CLASS='link' HREF='%s/%s'>diff</A>" % (app.get_url('diff'), os.path.relpath(path, root))
+    if not vcs or os.path.isdir(path) or not has_git_diff(path):
+        output = ""
+    return output
+
 def render_raw_link(path):
     output = "&nbsp;<A CLASS='link' HREF='%s/%s?raw'>raw</A>" % (app.get_url('view'), os.path.relpath(path, root))
     if os.path.isdir(path):
@@ -286,6 +339,7 @@ pre { word-wrap: break-word; }
 <DIV STYLE='display: inline-block;'>
 <DIV CLASS='navbar'>{{!render_navbar(path)}}</DIV>
 <DIV CLASS='navlink'>{{!render_raw_link(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_diff_link(path)}}</DIV>
 <DIV CLASS='navlink'>{{!render_edit_link(path)}}</DIV>
 </DIV>
 <DIV CLASS='dirlist'>{{!render_dir(os.path.dirname(path)) if not os.path.isdir(path) else ""}}</DIV>
