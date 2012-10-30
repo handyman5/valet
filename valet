@@ -298,7 +298,7 @@ template.defaults.update(locals())
 
 edit_form_template = SimpleTemplate("""
 <FORM METHOD='post' ACTION='{{!app.get_url('post')}}/{{short_path}}' ENCTYPE='multipart/form-data'>
-<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!app.get_url('edit')}}/{{short_path}}"'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!app.get_url('view')}}/{{short_path}}"'>
 %if vcs:
  <I>(edits will be committed)</I>
 %end
@@ -331,5 +331,5 @@ if __name__ == '__main__':
         readonly = options.readonly
         simple = options.simple
         vcs = options.vcs
-        
+
         run(host='0.0.0.0', port=options.port)
