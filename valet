@@ -1,8 +1,10 @@
 #!/usr/bin/env python
+"""valet is a script that turns any directory into a simple wiki,
+complete with wikitext rendering, editing, and automatically
+committing changes to version control."""
 
 from bottle import SimpleTemplate, abort, default_app, post, redirect, request, response, route, run, static_file
 from optparse import OptionParser
-import StringIO
 import mimetypes
 import os
 import os.path
@@ -12,11 +14,11 @@ import sys
 ###
 # Global constants
 ###
-app = default_app()
-root = os.getcwd()
-readonly = False
-simple = False
-vcs = True
+APP = default_app()
+ROOT = os.getcwd()
+READONLY = False
+SIMPLE = False
+VCS = False
 
 ###
 # Optional filetype support for wikitext rendering
@@ -56,9 +58,8 @@ try:
     import pygments
     from pygments import highlight
     from pygments.lexers import get_lexer_for_filename, get_lexer_for_mimetype
-    from pygments.formatters import HtmlFormatter
+    from pygments.formatters.html import HtmlFormatter
     from pygments.util import ClassNotFound
-    from pygments.styles import get_style_by_name
 except ImportError:
     pygments = None
 
@@ -69,46 +70,86 @@ mimetypes.add_type('text/x-chdr', '.h')
 mimetypes.add_type('text/plain', '.org')
 
 ###
+# Git functions
+###
+def git_enabled():
+    """Determines whether ROOT is a git repository"""
+    return os.path.isdir(os.path.join(ROOT, '.git'))
+
+def git_command(subcommand):
+    """Returns the stdout of the given git command"""
+    command = ['git', '--work-tree=' + ROOT,
+               '--git-dir=' + os.path.join(ROOT, '.git')] + subcommand
+    process = subprocess.Popen(command, stdout=subprocess.PIPE)
+    return process.communicate()[0]
+
+def git_file_versions(path):
+    """Returns a list of the git versions of the given path"""
+    if not git_enabled() or os.path.isdir(path):
+        return []
+    return [x for x in git_command(['log', r'--format=%h##%ar', path]).
+            split('\n') if x]
+
+###
 # Helpers for handling wikitext renderers
 ###
 class ContentReadyException(Exception):
+    """Implements flow control for dealing with different mime types"""
     def __init__(self, content, ctype='text/html', style=''):
         self.content = content
         self.ctype = ctype
         self.style = style
+class StaticFileException(Exception):
+    """Raised when a file should be returned as-is without formatting types"""
+    pass
 
-# Ensure a passed path is valid and inside the jail
-def check_path(short_path):
-    if not short_path: short_path = root
-    full_path = os.path.join(root, short_path)
-    if not os.path.abspath(full_path).startswith(root):
+def check_path(short_path, new=False):
+    """Ensure a passed path is valid and inside the jail"""
+    if not short_path:
+        short_path = ROOT
+    full_path = os.path.join(ROOT, short_path)
+    if not os.path.abspath(full_path).startswith(ROOT):
         abort(401, "Access denied; path outside of jail.")
-    if not os.path.exists(full_path):
+    if new:
+        if not os.path.exists(os.path.dirname(full_path)):
+            abort(404, "Please specify a valid path.")
+    elif not os.path.exists(full_path):
         abort(404, "Please specify a valid filename.")
     return full_path
 
-# Figure out the MIME type of a file if at all possible
+def get_file_data(path):
+    """Retrieves the contents of a file, and supports requesting a specific git hash"""
+    if 'version' in request.query and git_enabled():
+        return git_command(['show', request.query.version + ':' + os.path.relpath(path, ROOT)])
+    try:
+        with open(path) as handle:
+            return handle.read().decode('utf8')
+    except IOError as error:
+        abort(403, error)
+
 def discern_type(path):
-    t = mimetypes.guess_type(path, strict=False)[0]
-    if not t and Magic:
-        t = Magic(mime=True).from_file(path)
-    if not t:
+    """Figure out the MIME type of a file if at all possible"""
+    mtype = mimetypes.guess_type(path, strict=False)[0]
+    if not mtype and Magic:
+        mtype = Magic(mime=True).from_file(path)
+    if not mtype:
         # the python-magic module installed on Ubuntu is busted; reimplement it here
         if os.path.isdir(path):
-            t = 'inode/directory'
+            mtype = 'inode/directory'
         elif os.path.islink(path):
-            'inode/symlink'
-        elif os.stat(path)[6]==0:
-            'inode/x-empty'
+            mtype = 'inode/symlink'
+        elif os.stat(path)[6] == 0:
+            mtype = 'inode/x-empty'
         else:
-            t = "text/plain"
-    return t
+            mtype = "text/plain"
+    return mtype
 
-# Handle various special-case MIME types (directories, links, pygments, etc.)
 def dispatch(ctype, path):
+    """Figure out how to render various file types"""
+    # Special Cases
     if ctype == 'inode/symlink':
         realpath = os.path.abspath(os.readlink(path))
-        if not os.path.abspath(realpath).startswith(root):
+        if not os.path.abspath(realpath).startswith(ROOT):
             abort(401, "Access denied; path outside of jail.")
         else:
             dispatch(discern_type(realpath), realpath)
@@ -116,190 +157,99 @@ def dispatch(ctype, path):
         raise ContentReadyException(render_dir(path))
     elif ctype == 'inode/x-empty':
         raise ContentReadyException("<I>(empty file)</I>")
-    elif ctype == 'text/html':
-        pass
 
-    if not simple:
-        if markdown and ctype == 'text/x-markdown':
-            output = StringIO.StringIO()
-            dirname = os.path.dirname(os.path.relpath(path, root))
-            md = markdown.markdownFromFile(
-                path, output=output,
-                extensions=['wikilinks', 'codehilite'],
-                extension_configs = {'wikilinks': [
-                    ('base_url', '%s/%s/' % (app.get_url('view'), dirname)),
-                    ('end_url',  '.md')]})
-            output.seek(0)
-            raise ContentReadyException(output.read().decode('utf-8'))
-        elif creole and ctype == 'text/x-creole':
-            with open(path) as f:
-                data = f.read().decode('utf8')
-                raise ContentReadyException(creole.creole2html(data))
-        elif textile and ctype == 'text/x-textile':
-            with open(path) as f:
-                data = f.read().decode('utf8')
-                raise ContentReadyException(textile.textile(data, auto_link=True))
-        elif docutils and ctype == 'text/x-restructured-text':
-            with open(path) as f:
-                data = f.read().decode('utf8')
-                raise ContentReadyException(docutils.publish_string(data, writer_name='html'))
-        elif pygments:
-            try:
-                lexer = get_lexer_for_mimetype(ctype)
-                if isinstance(lexer, pygments.lexers.TextLexer):
-                    lexer = get_lexer_for_filename(path)
-                formatter = HtmlFormatter(style='default')
-                with open(path) as f:
-                    data = f.read().decode('utf-8')
-                    result = highlight(data, lexer, formatter)
-                    raise ContentReadyException(result, 'text/html',
-                                                style=formatter.get_style_defs())
-            except ClassNotFound as e:
-                print >> sys.stderr, "no lexer found for URL %s" % path
-                pass
+    # No Formatting
+    if 'raw' in request.query or SIMPLE:
+        # TODO: handle raw + version
+        raise StaticFileException()
+
+    # Actually load the file contents and try to parse them
+    if markdown and ctype == 'text/x-markdown':
+        output = markdown.markdown(get_file_data(path),
+                                   extensions=['wikilinks', 'codehilite'],
+                                   extension_configs={'wikilinks': [
+                                       ('base_url', get_url(os.path.dirname(path))),
+                                       ('end_url', '.md')]})
+        raise ContentReadyException(output)
+    elif creole and ctype == 'text/x-creole':
+        raise ContentReadyException(creole.creole2html(get_file_data(path)))
+    elif textile and ctype == 'text/x-textile':
+        raise ContentReadyException(textile.textile(get_file_data(path),
+                                                    auto_link=True))
+    elif docutils and ctype == 'text/x-restructured-text':
+        raise ContentReadyException(docutils.publish_string(get_file_data(path),
+                                                            writer_name='html'))
+    elif pygments:
+        try:
+            lexer = get_lexer_for_mimetype(ctype)
+            if isinstance(lexer, pygments.lexers.TextLexer):
+                lexer = get_lexer_for_filename(path)
+            formatter = HtmlFormatter(style='default')
+            result = highlight(get_file_data(path), lexer, formatter)
+            raise ContentReadyException(result, 'text/html',
+                                        style=formatter.get_style_defs())
+        except ClassNotFound:
+            print >> sys.stderr, "no lexer found for URL %s" % path
+
+    # Plain text
+    if ctype.startswith('text/'):
+        data = u"<PRE>%s</PRE>" % get_file_data(path)
+        raise ContentReadyException(data)
+
+    # Unknown file type, just hand it over
+    raise StaticFileException()
 
 ###
 # Routes
 ###
-@route('/')
-def redirect_root():
-    redirect(app.get_url('view'))
+def get_url(path='', kind='view'):
+    """This function takes either an absolute path or a path within the webapp and
+    returns the proper URL, including any WSGI non-root prefix
+    """
+    if not path:
+        return APP.get_url(kind)
+    relpath = os.path.relpath(path, ROOT)
+    if relpath.startswith('..'):
+        return APP.get_url(kind)
+    return APP.get_url(kind) + relpath
 
-@route('/view', name='view')
-@route('/view/')
-@route('/view/<short_path:path>')
+@route('/', name='view')
+@route('/<short_path:path>')
+@route('/<short_path:path>/')
 def view(short_path=None):
+    """Default route; dispatches to viewing and editing files, and other special behaviors"""
     full_path = check_path(short_path)
+
+    if 'edit' in request.query:
+        return editform(short_path)
+    elif 'new' in request.query:
+        return newform(short_path)
+    elif 'delete' in request.query:
+        return deleteform(short_path)
+    elif 'log' in request.query:
+        return log(short_path)
+    elif 'q' in request.query:
+        return search(request.query.q)
+    elif 'css' in request.query:
+        return css()
+
     if 'mime' in request.query:
         ctype = request.query.mime
     else:
         ctype = discern_type(full_path)
     try:
-        if 'raw' in request.query:
-            if not os.path.isdir(full_path):
-                return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
         dispatch(ctype, full_path)
-        if ctype.startswith('text/'):
-            try:
-                with open(full_path, 'rb') as data:
-                    body = u"<PRE>%s</PRE>" % data.read().decode('utf8')
-                    return template.render(path=full_path, body=body, readonly=readonly)
-            except IOError as e:
-                abort(403, e)
-        else:
-            return static_file(os.path.basename(full_path), os.path.dirname(full_path), mimetype=ctype)
-    except ContentReadyException as c:
-        response.content_type="%s; charset=utf-8" % c.ctype
-        return template.render(path=full_path, style=c.style, body=c.content, readonly=readonly)
+    except StaticFileException:
+        return static_file(os.path.basename(full_path),
+                           os.path.dirname(full_path), mimetype=ctype)
+    except ContentReadyException as cre:
+        response.content_type = "%s; charset=utf-8" % cre.ctype
+        return TEMPLATE.render(path=full_path, style=cre.style, body=cre.content)
 
-@route('/edit', name='edit')
-@route('/edit/<short_path:path>', name='edit')
-def edit(short_path=None):
-    if not short_path:
-        abort(404, 'No file specified.')
-    if readonly:
-        abort(403, 'Readonly mode is enabled, no editing')
-    full_path = check_path(short_path)
-    ctype = discern_type(full_path)
-    if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
-        abort(403, 'Not an editable file type')
-    with open(full_path) as data:
-        output = edit_form_template.render(short_path=short_path, data=data.read(), vcs=vcs)
-        return template.render(path=full_path, body=output, readonly=readonly)
-
-@post('/post', name='post')
-@post('/post/<short_path:path>')
-def post(short_path=None):
-    if not short_path:
-        abort(404, 'No file specified.')
-    if readonly:
-        abort(403, 'Readonly mode is enabled, no editing')
-    full_path = check_path(short_path)
-    try:
-        with open(full_path, 'wb') as handle:
-            handle.write(request.forms.get('data').replace('\r\n', '\n'))
-    except IOError as e:
-        abort(403, e)
-    if vcs:
-        gitdir = os.path.join(root, '.git')
-        if os.path.isdir(gitdir):
-            command = "git --work-tree=%s --git-dir=%s add %s" % (root, gitdir, full_path)
-            subprocess.Popen(command, shell=True)
-            command = "git --work-tree=%s --git-dir=%s commit -m 'valet: updated %s'" % (root, gitdir, short_path)
-            subprocess.Popen(command, shell=True)
-    redirect('%s/%s' % (app.get_url('view'), short_path))
-
-###
-# Rendering helpers
-###
-def render_navbar(path):
-    path_parts = os.path.relpath(path, root).split(os.path.sep)
-    path_stack = []
-    crumbs = []
-
-    for p in path_parts:
-        if p == '.': continue
-        path_stack.append(p)
-        crumbs.append((os.path.sep.join(path_stack), p))
-
-    crumbs.insert(0, ('', '<I>Home</I>'))
-
-    output = []
-    for (p, l) in crumbs[0:-1]:
-        output.append("<A HREF='%s/%s'>%s</A>" % (app.get_url('view'), p, l))
-    output.append(crumbs[-1][1])
-    return ' > '.join(output)
-
-def render_edit_link(path):
-    output = "&nbsp;<A CLASS='link' HREF='%s/%s'>edit</A>" % (app.get_url('edit'), os.path.relpath(path, root))
-    if readonly or os.path.isdir(path):
-        output = ""
-    return output
-
-def render_raw_link(path):
-    output = "&nbsp;<A CLASS='link' HREF='%s/%s?raw'>raw</A>" % (app.get_url('view'), os.path.relpath(path, root))
-    if os.path.isdir(path):
-        output = ""
-    return output
-
-def render_dir(path):
-    output = '<UL>'
-    for f in sorted(os.listdir(path)):
-        if f in ['.git', '.svn', '.hg', 'CVS']: continue
-        rpath = os.path.relpath(path, root)
-        pjoin = os.path.join(rpath, f)
-        output += "<LI><A HREF='%s/%s'>%s</A></LI>\n" % (app.get_url('view'), pjoin, f)
-    output += '</UL>'
-    return output
-
-###
-# Build standard page templates
-###
-template = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
-<STYLE>{{style}}
-.navbar { display: inline-block; border: solid 3px gray; border-top: 0px; padding-left: 2px; padding-right: 2px; float: left; }
-.navlink { float: right; }
-.dirlist { position: relative; float: right; right: 0; top: 0; border: solid 3px gray; border-top: 0px; border-right: 0px; margin-left: 10px; }
-pre { word-wrap: break-word; }
-</STYLE></HEAD>
-<BODY>
-<DIV STYLE='display: inline-block;'>
-<DIV CLASS='navbar'>{{!render_navbar(path)}}</DIV>
-<DIV CLASS='navlink'>{{!render_raw_link(path)}}</DIV>
-<DIV CLASS='navlink'>{{!render_edit_link(path)}}</DIV>
-</DIV>
-<DIV CLASS='dirlist'>{{!render_dir(os.path.dirname(path)) if not os.path.isdir(path) else ""}}</DIV>
-<DIV CLASS='main'>
-{{!body}}
-</DIV></BODY></HTML>
-""")
-template.defaults.update({'style': '', 'body': ''})
-template.defaults.update(locals())
-
-edit_form_template = SimpleTemplate("""
-<FORM METHOD='post' ACTION='{{!app.get_url('post')}}/{{short_path}}' ENCTYPE='multipart/form-data'>
-<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!app.get_url('view')}}/{{short_path}}"'>
-%if vcs:
+EDIT_FORM_TEMPLATE = SimpleTemplate("""
+<FORM METHOD='post' ACTION='{{!get_url(path)}}'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!get_url(path)}}"'>
+%if VCS:
  <I>(edits will be committed)</I>
 %end
 <BR><TEXTAREA NAME='data' ROWS=50 COLS=100>
@@ -307,29 +257,317 @@ edit_form_template = SimpleTemplate("""
 </TEXTAREA></FORM>
 """)
 
+def editform(short_path=None):
+    """Renders the HTML for the 'edit' window (placed in the body by view())"""
+    if not short_path:
+        abort(404, 'No file specified.')
+    if READONLY:
+        abort(403, 'Readonly mode is enabled, no editing')
+    full_path = check_path(short_path)
+    ctype = discern_type(full_path)
+    if not (ctype.startswith('text/') or ctype in ['application/xml', 'application/x-sh']):
+        abort(403, 'Not an editable file type')
+    with open(full_path) as data:
+        output = EDIT_FORM_TEMPLATE.render(path=short_path, data=data.read())
+        return TEMPLATE.render(path=full_path, body=output)
 
-if __name__ == '__main__':
+NEW_FORM_TEMPLATE = SimpleTemplate("""
+<FORM METHOD='post' ACTION='{{!get_url(path)}}'>
+<INPUT TYPE='submit'><INPUT TYPE='button' VALUE='Cancel' onclick='window.location = "{{!get_url(path)}}"'>
+%if VCS:
+ <I>(edits will be committed)</I>
+%end
+<BR>
+Filename: {{path}}/<INPUT TYPE='text' NAME='filename'><BR>
+<TEXTAREA NAME='data' ROWS=50 COLS=100>
+</TEXTAREA></FORM>
+""")
+
+def newform(short_path=None):
+    """Renders the HTML for the 'new file' window"""
+    if READONLY:
+        abort(403, 'Readonly mode is enabled, no editing')
+    full_path = check_path(short_path)
+    output = NEW_FORM_TEMPLATE.render(path=short_path)
+    return TEMPLATE.render(path=full_path, body=output)
+
+DELETE_FORM_TEMPLATE = SimpleTemplate("""
+<FORM METHOD='post' ACTION='{{!get_url(path)}}'>
+Are you sure you want to delete "{{path}}"?
+<INPUT TYPE='hidden' NAME='delete' VALUE='true'>
+<INPUT TYPE='submit' VALUE='Yes'><INPUT TYPE='button' VALUE='No' onclick='window.location = "{{!get_url(path)}}"'>
+</FORM>
+""")
+
+def deleteform(short_path=None):
+    """Renders the HTML for the 'delete file' window"""
+    if READONLY:
+        abort(403, 'Readonly mode is enabled, no deleting')
+    full_path = check_path(short_path)
+    output = DELETE_FORM_TEMPLATE.render(path=short_path)
+    return TEMPLATE.render(path=full_path, body=output)
+
+LOG_TEMPLATE = SimpleTemplate("""
+<TABLE>
+{{!data}}
+</PRE></TR></TABLE>
+""")
+
+def log(short_path=None):
+    """Retrieves the git history for a file and renders it as a table"""
+    if not git_enabled() or os.path.isdir(short_path):
+        return ""
+    full_path = check_path(short_path)
+    changes = git_command(
+        ['whatchanged', '-b', '-p', '-n 40',
+         '''--pretty=format:</pre></td></tr>%n<tr><td>%h</td><td>%an &lt;%ae&gt;</td><td>%ad</td></tr>%n<tr><td colspan='3'>%s</td></tr>%n<tr><td colspan='3'><pre>%n''',
+         '--', short_path]).replace("</pre></td></tr>", "", 1).decode('utf8', errors='ignore')
+    if len(changes) == 0:
+        changes = "<h2>No history!</h2>"
+    log_data = LOG_TEMPLATE.render(data=changes)
+    style = """td { border: 1px solid gray; }"""
+    return TEMPLATE.render(path=full_path, body=log_data, style=style)
+
+@post('/<short_path:path>')
+@post('/<short_path:path>/')
+def postfile(short_path=None):
+    """Accepts a POST with an edited document and saves it to disk (and git, if enabled)"""
+    if not short_path:
+        abort(404, 'No file specified.')
+    if READONLY:
+        abort(403, 'Readonly mode is enabled, no editing')
+    if request.forms.get('filename'):
+        full_path = check_path(os.path.join(short_path, request.forms.get('filename')), new=True)
+    else:
+        full_path = check_path(short_path)
+
+    if request.forms.get('delete'):
+        try:
+            os.unlink(full_path)
+        except IOError as error:
+            abort(403, error)
+        if VCS and git_enabled():
+            git_command(['rm', full_path])
+            git_command(['commit', '-m', "valet: deleted %s" % full_path])
+        redirect(get_url(os.path.dirname(full_path)))
+    else:
+        try:
+            with open(full_path, 'wb') as handle:
+                handle.write(request.forms.get('data').replace('\r\n', '\n'))
+        except IOError as error:
+            abort(403, error)
+        if VCS and git_enabled():
+            git_command(['add', full_path])
+            git_command(['commit', '-m', "valet: updated %s" % full_path])
+        redirect(get_url(full_path))
+
+def search(query):
+    """Searches the root directory for `query` with grep"""
+    output = "<H2>Searching for '%s'</H2>" % query
+    output += "<H3>File Names</H3><UL>"
+    data = subprocess.Popen(['find', ROOT, '-iname', '*%s*' % query], stdout=subprocess.PIPE)
+    results = data.communicate()[0].split('\n')
+    for line in results:
+        if not line:
+            continue
+        output += "<LI><A HREF='%s'>%s</A></LI>" % (get_url(line), os.path.relpath(line, ROOT))
+    output += "</UL>"
+
+    output += "<H3>File Content</H3><UL>"
+    data = subprocess.Popen(['grep', '--exclude-dir=.git',
+                             '-ir', query, '.'], stdout=subprocess.PIPE)
+    results = data.communicate()[0].split('\n')
+    for line in results:
+        if not line:
+            continue
+        (res_file, _, res_data) = line.partition(':')
+        res_file = res_file.replace('./', '')
+        output += "<LI><A HREF='%s'>%s</A>: %s</LI>" % (get_url(res_file), res_file, res_data)
+    output += "</UL>"
+
+    return TEMPLATE.render(path=check_path(''), body=output)
+
+###
+# Rendering helpers
+###
+def render_navbar(path):
+    """Renders the HTML for the navigation crumbs at the top of the page"""
+    path_parts = os.path.relpath(path, ROOT).split(os.path.sep)
+    path_stack = ['']
+    crumbs = []
+
+    for part in path_parts:
+        if part == '.':
+            continue
+        path_stack.append(part)
+        crumbs.append((os.path.sep.join(path_stack), part))
+
+    if not crumbs:
+        return "<A HREF='%s'><I>Home</I></A>" % get_url()
+
+    crumbs.insert(0, (get_url(), '<I>Home</I>'))
+    output = []
+    for (part, label) in crumbs[0:-1]:
+        output.append("<A HREF='%s'>%s</A>" % (part, label))
+    output.append(crumbs[-1][1])
+    return ' > '.join(output)
+
+def render_edit_link(path):
+    """Renders the HTML for the 'edit' link, if available"""
+    if READONLY or os.path.isdir(path) or 'edit' in request.query:
+        return ""
+    return "<A CLASS='link' HREF='%s?edit'>edit</A>" % get_url(path)
+
+def render_delete_link(path):
+    """Renders the HTML for the 'delete' link, if available"""
+    if READONLY or os.path.isdir(path) or 'delete' in request.query:
+        return ""
+    return "<A CLASS='link' HREF='%s?delete'>delete</A>" % get_url(path)
+
+def render_new_link(path):
+    """Renders the HTML for the 'new' link, if available"""
+    if READONLY or 'new' in request.query:
+        return ""
+    if not os.path.isdir(path):
+        path = os.path.dirname(path)
+    return "<A CLASS='link' HREF='%s?new'>new</A>" % get_url(path)
+
+def render_raw_link(path):
+    """Renders the HTML for the 'raw' link"""
+    if os.path.isdir(path):
+        return ""
+    return "<A CLASS='link' HREF='%s?raw'>raw</A>" % get_url(path)
+
+def render_log_link(path):
+    """Renders the HTML for the 'log' link"""
+    if os.path.isdir(path) or not git_enabled():
+        return ""
+    if not git_file_versions(path):
+        return ""
+    if 'log' in request.query:
+        return "<A CLASS='link' HREF='%s?view'>view</A>" % get_url(path)
+    return "<A CLASS='link' HREF='%s?log'>log</A>" % get_url(path)
+
+def render_search_box():
+    """Renders the HTML for the search box"""
+    if 'new' in request.query or 'edit' in request.query:
+        return ""
+    return "<form action='%s?search'> \
+    <input type='text' name='q' autofocus> \
+    <input type='submit' style='display:none'></form>" % get_url()
+
+def render_version_chooser(path):
+    """Renders the HTML for the version chooser"""
+    if not git_enabled() or os.path.isdir(path):
+        return ""
+
+    versions = git_file_versions(path)
+    if not versions:
+        return ""
+    output = "<FORM ACTION='%s'><SELECT NAME='version' onchange='this.form.submit()'>" % get_url(path)
+    for ver in versions:
+        (chash, cdate) = ver.split('##')
+        selected = ('version' in request.query and
+                    request.query.version == chash) and 'selected' or ''
+        output += "<OPTION VALUE='%s' %s>%s - %s</OPTION>" % (chash, selected, chash, cdate)
+    output += '</SELECT></FORM>\n'
+    return output
+
+def render_dir(path, depth=10, include_me=False):
+    """Renders the HTML for the directory tree in the upper-right corner"""
+    output = '<UL>'
+    if include_me:
+        output += "<LI><A HREF='%s'>%s</A></LI>\n<UL>" % (get_url(path), os.path.basename(path))
+    for fname in sorted(os.listdir(path)):
+        if fname in ['.git', '.svn', '.hg', 'CVS']:
+            continue
+        rpath = os.path.relpath(path, ROOT)
+        pjoin = os.path.join(rpath, fname)
+        output += "<LI><A HREF='%s'>%s</A>\n" % (get_url(pjoin), fname)
+        if depth >= 1 and os.path.isdir(pjoin):
+            output += render_dir(pjoin, depth-1)
+        output += "</LI>\n"
+    output += '</UL>'
+    if include_me:
+        output += '</UL>'
+    return output
+
+###
+# Build standard page templates
+###
+TEMPLATE = SimpleTemplate("""<HTML><HEAD><TITLE>{{path}}</TITLE>
+<LINK HREF='{{!get_url()}}?css' rel='stylesheet'>
+<STYLE>{{style}}</STYLE></HEAD>
+<BODY>
+<DIV CLASS='header'>
+<DIV CLASS='navbar'>{{!render_navbar(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_search_box()}}</DIV>
+<DIV CLASS='navlink'>{{!render_new_link(path)}}</DIV>
+<DIV CLASS='navlink'>&nbsp;</DIV>
+<DIV CLASS='navlink'>{{!render_raw_link(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_edit_link(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_delete_link(path)}}</DIV>
+<DIV CLASS='navlink'>&nbsp;</DIV>
+<DIV CLASS='navlink'>{{!render_log_link(path)}}</DIV>
+<DIV CLASS='navlink'>{{!render_version_chooser(path)}}</DIV>
+</DIV>
+<DIV CLASS='dirlist'>
+%if path == ROOT:
+  {{!render_dir(path, depth=1)}}
+%else:
+  %parent = os.path.dirname(path)
+  {{!render_dir(parent, depth=1, include_me=(parent != ROOT))}}
+%end
+</DIV>
+<DIV CLASS='main'>
+{{!body}}
+</DIV></BODY></HTML>
+""")
+TEMPLATE.defaults.update({'style': '', 'body': ''})
+TEMPLATE.defaults.update(locals())
+
+def css():
+    """Returns the static CSS rules we use for the navbar and dirlist"""
+    response.set_header('Content-Type', 'text/css')
+    return """
+.header { display: inline-block; float: left; }
+.main { clear: left; }
+.navbar { display: inline-block; border: solid 3px gray; border-top: 0px; padding-left: 2px; padding-right: 2px; float: left; }
+.navlink { float: left; padding-left: 4px; }
+.dirlist { position: relative; float: right; right: 0; top: 0; border: solid 3px gray; border-top: 0px; border-right: 0px; margin-left: 10px; display: block; clear: none; }
+pre { word-wrap: break-word; }
+ul { margin-top: 0px; padding-left: 24px; }
+"""
+
+def main():
+    """The main body of the program"""
     if sys.argv[0].endswith('.cgi'):
         run(server='cgi')
     elif sys.argv[0].endswith('.fcgi'):
         from flup.server.fcgi import WSGIServer
-        WSGIServer(app.wsgi).run()
+        WSGIServer(APP.wsgi).run()
     else:
         parser = OptionParser(usage="usage: %prog [<options>]")
         parser.add_option("-d", "--directory", action="store", dest="root",
-                          default=os.getcwd(), help="Directory to serve (defaults to $CWD)")
+                          default=os.getcwd(),
+                          help="Directory to serve (defaults to $CWD)")
         parser.add_option("-r", "--readonly", action="store_true", dest="readonly",
-                          default=False, help="Make the website read-only")
+                          help="Make the website read-only")
         parser.add_option("-p", "--port", action="store", dest="port",
-                          default=9876, type=int, help="Port number to use (defaults to 9876)")
+                          default=9876, type=int,
+                          help="Port number to use (defaults to 9876)")
         parser.add_option("-s", "--simple", action="store_true", dest="simple",
                           help="Disables all special-case processing (wikitext rendering, pygments syntax coloring, etc.)")
-        parser.add_option("-v", "--vcs", action="store_true", dest="vcs", default=False,
-                                                        help="Edits in the web interface are automatically commited to the appropriate VCS")
-        (options,args) = parser.parse_args()
-        root = os.path.abspath(options.root)
-        readonly = options.readonly
-        simple = options.simple
-        vcs = options.vcs
+        parser.add_option("-v", "--vcs", action="store_true", dest="vcs",
+                          help="Edits in the web interface are automatically commited to the appropriate VCS")
+        (options, _) = parser.parse_args()
+        global ROOT, READONLY, SIMPLE, VCS
+        ROOT = os.path.abspath(options.root)
+        READONLY = options.readonly
+        SIMPLE = options.simple
+        VCS = options.vcs
 
         run(host='0.0.0.0', port=options.port)
+
+if __name__ == '__main__':
+    main()

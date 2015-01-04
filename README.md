@@ -6,6 +6,23 @@ It's a single file with no strict requirements aside from [`bottle`](http://bott
 
 News
 ====
+2015-01-03
+----------
+I got a bee in my bonnet recently on making some improvements to `valet`, so Merry Christmas to you all.
+
+New features:
+
+- The `/view/X`, `/edit/X`, etc. paths have been removed in favor of using URL query arguments, e.g. `X?edit` and `X?delete`. CGI/WSGI path prefixes still work fine.
+- New file-management-related functionality, like creating new files and deleting files
+- Search! A fancy search field will grep through documents and filenames for your query
+- Lots of git-related functionality has been added, including:
+    - Displaying a dropdown that lets you view an old version of a file
+    - Displaying a table with detailed status about the last few changes to a file
+- Lots of code cleanup, refactoring, and simplification
+- Fixed a ton of bugs
+- Lots of code changes to better comply with pylint (score 9.24)
+- Added some basic unit/regression tests in `tests.py`
+
 2012-10-28
 ----------
 I spent some time hacking on `valet` this weekend, fixing a few bugs and adding one big new feature: CGI/WSGI support. Now if you link or rename `valet` to `something.cgi` or `something.fcgi`, it will "Do The Right Thing" and operate as a proper webapp. (WSGI support requires [`flup`](http://trac.saddi.com/flup).)
