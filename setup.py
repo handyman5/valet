@@ -7,7 +7,7 @@ setup(
         name = "valet",
         author = "Adam Compton",
         author_email = "comptona@gmail.com",
-        version = "0.3",
+        version = "0.4",
         license = "BSD-2-Clause",
         url = "https://github.com/handyman5/valet",
         download_url = "https://github.com/handyman5/valet/tarball/master",
